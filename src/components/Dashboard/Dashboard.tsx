@@ -1,0 +1,420 @@
+import { useState, useEffect } from 'react';
+import { Users, Clock, DollarSign, TrendingUp, Calendar, CheckCircle, RefreshCw, FileText } from 'lucide-react';
+import { useAuth } from '../../contexts/AuthContext';
+import { supabase } from '../../lib/supabase';
+
+interface DashboardProps {
+  onViewChange: (view: string) => void;
+}
+
+interface Activity {
+  id: string;
+  type: string;
+  description: string;
+  created_at: string;
+}
+
+export function Dashboard({ onViewChange }: DashboardProps) {
+  const { profile, user } = useAuth();
+  const [stats, setStats] = useState({
+    employees: 0,
+    hoursThisMonth: 0,
+    payrollsProcessed: 0,
+    monthlyPayrollTotal: 0,
+  });
+  const [recentActivity, setRecentActivity] = useState<Activity[]>([]);
+
+  useEffect(() => {
+    if (user) {
+      loadStats();
+      loadRecentActivity();
+    }
+  }, [user]);
+
+  const loadStats = async () => {
+    if (!user) return;
+
+    const now = new Date();
+    const firstDayOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const lastDayOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+
+    const firstDayStr = firstDayOfMonth.toISOString().split('T')[0];
+    const lastDayStr = lastDayOfMonth.toISOString().split('T')[0];
+
+    const [employeesResult, hoursResult, payrollsResult, monthlyPayrollResult] = await Promise.all([
+      supabase.from('employees').select('id', { count: 'exact', head: true }).eq('user_id', user.id).eq('status', 'active'),
+      supabase.from('hour_records').select('hours').eq('user_id', user.id).gte('date', firstDayStr).lte('date', lastDayStr),
+      supabase.from('payroll_history').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
+      supabase.from('payroll_history').select('net_salary').eq('user_id', user.id).gte('created_at', firstDayStr).lte('created_at', lastDayStr),
+    ]);
+
+    const totalHours = hoursResult.data?.reduce((sum, record) => sum + Number(record.hours || 0), 0) || 0;
+    const monthlyTotal = monthlyPayrollResult.data?.reduce((sum, record) => sum + Number(record.net_salary || 0), 0) || 0;
+
+    setStats({
+      employees: employeesResult.count || 0,
+      hoursThisMonth: totalHours,
+      payrollsProcessed: payrollsResult.count || 0,
+      monthlyPayrollTotal: monthlyTotal,
+    });
+  };
+
+  const loadRecentActivity = async () => {
+    if (!user) return;
+
+    const activities: Activity[] = [];
+
+    const [employeesResult, hoursResult, payrollsResult] = await Promise.all([
+      supabase.from('employees').select('full_name, created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+      supabase.from('hour_records').select('id, created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+      supabase.from('payroll_history').select('id, created_at').eq('user_id', user.id).order('created_at', { ascending: false }).limit(3),
+    ]);
+
+    if (employeesResult.data) {
+      employeesResult.data.forEach(emp => {
+        activities.push({
+          id: `emp-${emp.created_at}`,
+          type: 'employee',
+          description: `Empleado registrado: ${emp.full_name}`,
+          created_at: emp.created_at,
+        });
+      });
+    }
+
+    if (hoursResult.data) {
+      hoursResult.data.forEach(hour => {
+        activities.push({
+          id: `hour-${hour.id}`,
+          type: 'hour',
+          description: 'Registro de horas agregado',
+          created_at: hour.created_at,
+        });
+      });
+    }
+
+    if (payrollsResult.data) {
+      payrollsResult.data.forEach(payroll => {
+        activities.push({
+          id: `payroll-${payroll.id}`,
+          type: 'payroll',
+          description: 'Nómina generada',
+          created_at: payroll.created_at,
+        });
+      });
+    }
+
+    activities.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    setRecentActivity(activities.slice(0, 5));
+  };
+
+  const handleResetMonthlyTotal = () => {
+    if (confirm('¿Estás seguro de que deseas reiniciar el contador del mes? Esta acción no eliminará datos, solo reiniciará la visualización del mes actual.')) {
+      setStats(prev => ({ ...prev, monthlyPayrollTotal: 0 }));
+    }
+  };
+
+  const handleResetHours = async () => {
+    if (!user) return;
+
+    const confirmed = confirm('¿Estás seguro de que deseas ELIMINAR todos los registros de horas? Esta acción NO se puede deshacer.');
+    if (!confirmed) return;
+
+    const doubleConfirm = confirm('ÚLTIMA ADVERTENCIA: Se eliminarán TODOS los registros de horas permanentemente. ¿Continuar?');
+    if (!doubleConfirm) return;
+
+    const { error } = await supabase
+      .from('hour_records')
+      .delete()
+      .eq('user_id', user.id);
+
+    if (error) {
+      alert('Error al eliminar registros: ' + error.message);
+    } else {
+      alert('Todos los registros de horas han sido eliminados');
+      loadStats();
+      loadRecentActivity();
+    }
+  };
+
+  const handleResetPayrolls = async () => {
+    if (!user) return;
+
+    const confirmed = confirm('¿Estás seguro de que deseas ELIMINAR todas las nóminas? Esta acción NO se puede deshacer.');
+    if (!confirmed) return;
+
+    const doubleConfirm = confirm('ÚLTIMA ADVERTENCIA: Se eliminarán TODAS las nóminas permanentemente. ¿Continuar?');
+    if (!doubleConfirm) return;
+
+    const { error } = await supabase
+      .from('payroll_history')
+      .delete()
+      .eq('user_id', user.id);
+
+    if (error) {
+      alert('Error al eliminar nóminas: ' + error.message);
+    } else {
+      alert('Todas las nóminas han sido eliminadas');
+      loadStats();
+      loadRecentActivity();
+    }
+  };
+
+  const formatCurrency = (value: number) => {
+    return new Intl.NumberFormat('es-CO', {
+      style: 'currency',
+      currency: 'COP',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0,
+    }).format(value);
+  };
+
+  const getActivityIcon = (type: string) => {
+    switch (type) {
+      case 'employee':
+        return Users;
+      case 'hour':
+        return Clock;
+      case 'payroll':
+        return DollarSign;
+      default:
+        return FileText;
+    }
+  };
+
+  const getActivityColor = (type: string) => {
+    switch (type) {
+      case 'employee':
+        return 'text-green-600';
+      case 'hour':
+        return 'text-orange-600';
+      case 'payroll':
+        return 'text-emerald-600';
+      default:
+        return 'text-blue-600';
+    }
+  };
+
+  const formatRelativeTime = (dateString: string) => {
+    const date = new Date(dateString);
+    const now = new Date();
+    const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+
+    if (diffInSeconds < 60) return 'Hace un momento';
+    if (diffInSeconds < 3600) return `Hace ${Math.floor(diffInSeconds / 60)} minutos`;
+    if (diffInSeconds < 86400) return `Hace ${Math.floor(diffInSeconds / 3600)} horas`;
+    if (diffInSeconds < 604800) return `Hace ${Math.floor(diffInSeconds / 86400)} días`;
+    return date.toLocaleDateString('es-CO');
+  };
+
+  const statCards = [
+    {
+      name: 'Empleados Total',
+      value: stats.employees.toString(),
+      icon: Users,
+      bgColor: 'bg-green-50',
+      textColor: 'text-green-600'
+    },
+    {
+      name: 'Horas Registradas (Mes)',
+      value: stats.hoursThisMonth.toFixed(1),
+      icon: Clock,
+      bgColor: 'bg-orange-50',
+      textColor: 'text-orange-600'
+    },
+    {
+      name: 'Nóminas Procesadas',
+      value: stats.payrollsProcessed.toString(),
+      icon: DollarSign,
+      bgColor: 'bg-emerald-50',
+      textColor: 'text-emerald-600'
+    },
+  ];
+
+  const quickStartSteps = [
+    { title: 'Registra tus empleados', description: 'Agrega la información de tu personal', view: 'employees', completed: stats.employees > 0 },
+    { title: 'Registra las horas trabajadas', description: 'Ingresa las horas de cada tipo', view: 'hour-records', completed: stats.hoursThisMonth > 0 },
+    { title: 'Genera tu primera nómina', description: 'Calcula y genera comprobantes', view: 'payroll', completed: stats.payrollsProcessed > 0 },
+  ];
+
+  return (
+    <div className="space-y-8 animate-fadeIn">
+      <div className="animate-fadeInDown">
+        <h2 className="text-4xl font-bold bg-gradient-to-r from-slate-800 to-slate-600 bg-clip-text text-transparent mb-2">
+          Bienvenido, {profile?.full_name}
+        </h2>
+        <p className="text-slate-600 text-lg">Resumen general de tu sistema de nómina</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {statCards.map((stat, index) => {
+          const Icon = stat.icon;
+          const showResetButton = stat.name === 'Horas Registradas (Mes)' || stat.name === 'Nóminas Procesadas';
+          const handleReset = stat.name === 'Horas Registradas (Mes)' ? handleResetHours : handleResetPayrolls;
+
+          return (
+            <div
+              key={stat.name}
+              className={`bg-white rounded-2xl shadow-lg border border-slate-100 p-6 hover:shadow-xl transition-all transform hover:scale-105 animate-fadeInUp`}
+              style={{ animationDelay: `${index * 0.1}s` }}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className={`${stat.bgColor} p-3 rounded-xl shadow-md`}>
+                  <Icon className={`w-6 h-6 ${stat.textColor}`} />
+                </div>
+                {showResetButton && (
+                  <button
+                    onClick={handleReset}
+                    className="p-2 hover:bg-slate-100 rounded-lg transition-all"
+                    title={`Eliminar todos los ${stat.name.toLowerCase()}`}
+                  >
+                    <RefreshCw className="w-4 h-4 text-slate-400 hover:text-red-600" />
+                  </button>
+                )}
+              </div>
+              <div>
+                <p className="text-sm font-medium text-slate-600 mb-1">{stat.name}</p>
+                <p className="text-4xl font-bold text-slate-800">{stat.value}</p>
+              </div>
+            </div>
+          );
+        })}
+
+        <div
+          className="bg-white rounded-2xl shadow-lg border border-slate-100 p-6 hover:shadow-xl transition-all transform hover:scale-105 animate-fadeInUp"
+          style={{ animationDelay: '0.3s' }}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <div className="bg-blue-50 p-3 rounded-xl shadow-md">
+              <DollarSign className="w-6 h-6 text-blue-600" />
+            </div>
+            <button
+              onClick={handleResetMonthlyTotal}
+              className="p-2 hover:bg-slate-100 rounded-lg transition-all"
+              title="Limpiar total del mes"
+            >
+              <RefreshCw className="w-4 h-4 text-slate-400 hover:text-blue-600" />
+            </button>
+          </div>
+          <div>
+            <p className="text-sm font-medium text-slate-600 mb-1">Total Nómina Mes</p>
+            <p className="text-3xl font-bold text-slate-800">{formatCurrency(stats.monthlyPayrollTotal)}</p>
+            <p className="text-xs text-slate-500 mt-1">{new Date().toLocaleDateString('es-CO', { month: 'long', year: 'numeric' })}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-100 p-6 animate-fadeInUp animation-delay-400">
+          <div className="flex items-center space-x-2 mb-4">
+            <Calendar className="w-5 h-5 text-slate-600" />
+            <h3 className="text-xl font-bold text-slate-800">Actividad Reciente</h3>
+          </div>
+          <div className="space-y-3">
+            {recentActivity.length > 0 ? (
+              recentActivity.map((activity) => {
+                const Icon = getActivityIcon(activity.type);
+                const colorClass = getActivityColor(activity.type);
+                return (
+                  <div
+                    key={activity.id}
+                    className="flex items-center space-x-3 p-4 bg-gradient-to-r from-slate-50 to-slate-100 rounded-xl border border-slate-200"
+                  >
+                    <div className="bg-white p-2 rounded-lg shadow-sm">
+                      <Icon className={`w-5 h-5 ${colorClass}`} />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm font-semibold text-slate-800">{activity.description}</p>
+                      <p className="text-xs text-slate-500">{formatRelativeTime(activity.created_at)}</p>
+                    </div>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="flex items-center space-x-3 p-4 bg-gradient-to-r from-slate-50 to-slate-100 rounded-xl border border-slate-200">
+                <div className="bg-white p-2 rounded-lg shadow-sm">
+                  <TrendingUp className="w-5 h-5 text-blue-600" />
+                </div>
+                <div className="flex-1">
+                  <p className="text-sm font-semibold text-slate-800">Sistema iniciado</p>
+                  <p className="text-xs text-slate-500">Comienza agregando empleados</p>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white rounded-2xl shadow-lg border border-slate-100 p-6 animate-fadeInUp animation-delay-600">
+          <h3 className="text-xl font-bold text-slate-800 mb-4">Acciones Rápidas</h3>
+          <div className="space-y-3">
+            <button
+              onClick={() => onViewChange('employees')}
+              className="w-full text-left p-4 bg-gradient-to-r from-green-50 to-green-100 hover:from-green-100 hover:to-green-200 rounded-xl transition-all border border-green-200 transform hover:scale-[1.02] hover:shadow-md"
+            >
+              <div className="flex items-center space-x-3">
+                <div className="bg-white p-2 rounded-lg shadow-sm">
+                  <Users className="w-6 h-6 text-green-600" />
+                </div>
+                <div>
+                  <p className="font-bold text-green-900">Agregar Empleado</p>
+                  <p className="text-sm text-green-600">Registra un nuevo empleado</p>
+                </div>
+              </div>
+            </button>
+            <button
+              onClick={() => onViewChange('hour-records')}
+              className="w-full text-left p-4 bg-gradient-to-r from-orange-50 to-orange-100 hover:from-orange-100 hover:to-orange-200 rounded-xl transition-all border border-orange-200 transform hover:scale-[1.02] hover:shadow-md"
+            >
+              <div className="flex items-center space-x-3">
+                <div className="bg-white p-2 rounded-lg shadow-sm">
+                  <Clock className="w-6 h-6 text-orange-600" />
+                </div>
+                <div>
+                  <p className="font-bold text-orange-900">Registrar Horas</p>
+                  <p className="text-sm text-orange-600">Registra horas trabajadas</p>
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-gradient-to-br from-blue-600 via-blue-700 to-blue-800 rounded-2xl shadow-2xl p-10 text-white animate-fadeInScale animation-delay-800">
+        <div className="flex items-center justify-between">
+          <div className="flex-1">
+            <h3 className="text-3xl font-bold mb-3">Guía de Inicio Rápido</h3>
+            <p className="text-blue-100 mb-6 text-lg max-w-xl">
+              Sigue estos pasos para comenzar a gestionar tu nómina de manera eficiente y profesional.
+            </p>
+            <div className="space-y-3 mb-6">
+              {quickStartSteps.map((step, index) => (
+                <div
+                  key={index}
+                  onClick={() => onViewChange(step.view)}
+                  className="bg-white bg-opacity-10 backdrop-blur-sm p-4 rounded-xl border border-white border-opacity-20 hover:bg-opacity-20 transition-all cursor-pointer"
+                >
+                  <div className="flex items-center space-x-3">
+                    <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${step.completed ? 'bg-green-500' : 'bg-white bg-opacity-20'}`}>
+                      {step.completed ? (
+                        <CheckCircle className="w-5 h-5 text-white" />
+                      ) : (
+                        <span className="text-white font-bold">{index + 1}</span>
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className="font-bold text-white">{step.title}</p>
+                      <p className="text-sm text-blue-100">{step.description}</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="hidden lg:block animate-float">
+            <TrendingUp className="w-32 h-32 text-blue-400 opacity-50" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
